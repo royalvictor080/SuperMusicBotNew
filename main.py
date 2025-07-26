@@ -1,82 +1,63 @@
 import os
 import asyncio
 from pyrogram import Client, filters
-from pytgcalls import PyTgCalls, idle
-from pytgcalls.types import Update
-from pytgcalls.types.input_stream import InputAudioStream
-from yt_dlp import YoutubeDL
-from pymongo import MongoClient
+from pytgcalls import PyTgCalls
+from pytgcalls.types import AudioPiped
 
-# Env variables
+# ================== ENV VARIABLES ==================
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-MONGO_URI = os.environ.get("MONGO_URI")
-FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
 
-# Setup MongoDB
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["musicbot"]
-history_col = db["history"]
+# ================== PYROGRAM CLIENT ==================
+app = Client(
+    "music-bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
-# Pyrogram client
-app = Client("MusicBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# ================== PYTGCALLS CLIENT ==================
+call_py = PyTgCalls(app)
 
-# PyTgCalls
-pytgcalls = PyTgCalls(app)
-
-# YT-DLP options
-ydl_opts = {
-    'format': 'bestaudio',
-    'noplaylist': True,
-    'quiet': True,
-    'extract_flat': False
-}
-
-async def download_audio(url):
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        return info['url'], info.get('title', 'Unknown')
-
-@pytgcalls.on_stream_end()
-async def on_end(_, update: Update):
-    chat_id = update.chat_id
-    await pytgcalls.leave_group_call(chat_id)
+# ================== SIMPLE COMMAND ==================
+@app.on_message(filters.command("start") & filters.private)
+async def start(_, message):
+    await message.reply("✅ **Music Bot is online and ready to play music!**\nUse `/play <song name>` in a group.")
 
 @app.on_message(filters.command("play") & filters.group)
-async def play_music(_, message):
+async def play_song(_, message):
     if len(message.command) < 2:
-        return await message.reply_text("Usage: /play <song name or YouTube URL>")
+        return await message.reply("❌ Please give a song name or YouTube URL to play.")
+    
     query = " ".join(message.command[1:])
-    await message.reply_text("Searching...")
+    await message.reply(f"🎶 **Playing:** `{query}`")
 
-    # Download audio URL
-    url, title = await download_audio(query)
-    await pytgcalls.join_group_call(
+    # Download using yt-dlp
+    import yt_dlp
+    ydl_opts = {"format": "bestaudio", "quiet": True, "outtmpl": "song.%(ext)s"}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(query, download=True)
+        file_path = ydl.prepare_filename(info)
+
+    # Join and play audio
+    await call_py.join_group_call(
         message.chat.id,
-        InputAudioStream(url)
+        AudioPiped(file_path)
     )
-    history_col.insert_one({"chat_id": message.chat.id, "title": title})
-    await message.reply_text(f"🎶 Playing **{title}**")
 
 @app.on_message(filters.command("stop") & filters.group)
 async def stop_music(_, message):
-    await pytgcalls.leave_group_call(message.chat.id)
-    await message.reply_text("⏹ Stopped")
+    await call_py.leave_group_call(message.chat.id)
+    await message.reply("⏹ **Stopped the music.**")
 
-@app.on_message(filters.command("history") & filters.group)
-async def history(_, message):
-    songs = list(history_col.find({"chat_id": message.chat.id}))
-    if not songs:
-        return await message.reply_text("No songs played yet.")
-    text = "Last Songs:\n" + "\n".join([s['title'] for s in songs[-10:]])
-    await message.reply_text(text)
-
+# ================== MAIN ==================
 async def main():
     await app.start()
-    await pytgcalls.start()
-    print("Bot is running...")
+    await call_py.start()
+    print("Bot started successfully...")
     await idle()
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(main())
+    from pyrogram import idle
+    asyncio.run(main())
